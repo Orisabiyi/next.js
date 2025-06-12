@@ -1311,7 +1311,10 @@ impl Project {
                 self.next_config(),
                 self.execution_context(),
             ),
-            LayerName::new(rcstr!("middleware-edge")),
+            LayerName::with_user_friendly_name(
+                rcstr!("middleware-edge"),
+                rcstr!("Edge Middleware"),
+            ),
         )))
     }
 
@@ -1365,7 +1368,7 @@ impl Project {
                 self.next_config(),
                 self.execution_context(),
             ),
-            LayerName::new(rcstr!("middleware")),
+            LayerName::with_user_friendly_name(rcstr!("middleware"), rcstr!("Middleware")),
         )))
     }
 
