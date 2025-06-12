@@ -34,6 +34,7 @@ import { InvariantError } from '../../../shared/lib/invariant-error'
 import type { Revalidate } from '../cache-control'
 import { getPreviouslyRevalidatedTags } from '../../server-utils'
 import { workAsyncStorage } from '../../app-render/work-async-storage.external'
+import { DetachedPromise } from '../../../lib/detached-promise'
 
 export interface CacheHandlerContext {
   fs?: CacheFs
@@ -91,6 +92,7 @@ export class IncrementalCache implements IncrementalCacheType {
   readonly fetchCacheKeyPrefix?: string
   readonly revalidatedTags?: string[]
   readonly isOnDemandRevalidate?: boolean
+  private readonly debug: boolean = !!process.env.NEXT_PRIVATE_DEBUG_CACHE
 
   private readonly locks = new Map<string, Promise<void>>()
 
@@ -127,7 +129,6 @@ export class IncrementalCache implements IncrementalCacheType {
     fetchCacheKeyPrefix?: string
     CurCacheHandler?: typeof CacheHandler
   }) {
-    const debug = !!process.env.NEXT_PRIVATE_DEBUG_CACHE
     this.hasCustomCacheHandler = Boolean(CurCacheHandler)
 
     const cacheHandlersSymbol = Symbol.for('@next/cache-handlers')
@@ -145,13 +146,13 @@ export class IncrementalCache implements IncrementalCacheType {
         CurCacheHandler = globalCacheHandler.FetchCache
       } else {
         if (fs && serverDistDir) {
-          if (debug) {
+          if (this.debug) {
             console.log('using filesystem cache handler')
           }
           CurCacheHandler = FileSystemCache
         }
       }
-    } else if (debug) {
+    } else if (this.debug) {
       console.log('using custom cache handler', CurCacheHandler.name)
     }
 
@@ -238,23 +239,42 @@ export class IncrementalCache implements IncrementalCacheType {
     this.cacheHandler?.resetRequestCache?.()
   }
 
-  async lock(cacheKey: string) {
-    let unlockNext: () => Promise<void> = () => Promise.resolve()
-    const existingLock = this.locks.get(cacheKey)
+  private successfullyLocked = 0
+  async lock(cacheKey: string): Promise<() => void> {
+    while (true) {
+      const lock = this.locks.get(cacheKey)
 
-    if (existingLock) {
-      await existingLock
+      if (this.debug) {
+        console.log('lock get', cacheKey, lock)
+      }
+
+      if (!lock) break
+
+      await lock
     }
 
-    const newLock = new Promise<void>((resolve) => {
-      unlockNext = async () => {
-        resolve()
-        this.locks.delete(cacheKey) // Remove the lock upon release
-      }
-    })
+    const { resolve: unlock, promise } = new DetachedPromise<void>()
 
-    this.locks.set(cacheKey, newLock)
-    return unlockNext
+    if (this.locks.has(cacheKey)) {
+      console.log('lock already exists', cacheKey)
+    }
+
+    this.successfullyLocked++
+    if (this.debug) {
+      console.log('successfully locked', this.successfullyLocked)
+    }
+
+    this.locks.set(
+      cacheKey,
+      promise.then(() => {
+        this.locks.delete(cacheKey)
+        if (this.debug) {
+          console.log('lock delete', cacheKey)
+        }
+      })
+    )
+
+    return unlock
   }
 
   async revalidateTag(tags: string | string[]): Promise<void> {
@@ -409,6 +429,12 @@ export class IncrementalCache implements IncrementalCacheType {
       if (resumeDataCache) {
         const memoryCacheData = resumeDataCache.fetch.get(cacheKey)
         if (memoryCacheData?.kind === CachedRouteKind.FETCH) {
+          // If a tag was revalidated we don't return stale data.
+          // if (this.checkTags(ctx)) {
+          //   console.log('tag was revalidated', ctx.tags, ctx.softTags)
+          //   return null
+          // }
+
           return { isStale: false, value: memoryCacheData }
         }
       }
@@ -443,17 +469,18 @@ export class IncrementalCache implements IncrementalCacheType {
         )
       }
 
-      const workStore = workAsyncStorage.getStore()
-      const combinedTags = [...(ctx.tags || []), ...(ctx.softTags || [])]
-      // if a tag was revalidated we don't return stale data
-      if (
-        combinedTags.some(
-          (tag) =>
-            this.revalidatedTags?.includes(tag) ||
-            workStore?.pendingRevalidatedTags?.includes(tag)
-        )
-      ) {
+      // If a tag was revalidated we don't return stale data.
+      if (this.checkTags(ctx)) {
         return null
+      }
+
+      const workUnitStore = workUnitAsyncStorage.getStore()
+      if (workUnitStore) {
+        const prerenderResumeDataCache =
+          getPrerenderResumeDataCache(workUnitStore)
+        if (prerenderResumeDataCache) {
+          prerenderResumeDataCache.fetch.set(cacheKey, cacheData.value)
+        }
       }
 
       const revalidate = ctx.revalidate || cacheData.value.revalidate
@@ -589,5 +616,34 @@ export class IncrementalCache implements IncrementalCacheType {
     } catch (error) {
       console.warn('Failed to update prerender cache for', pathname, error)
     }
+  }
+
+  checkTags({ softTags, tags }: GetIncrementalFetchCacheContext) {
+    const revalidatedTags = this.revalidatedTags
+    const workStore = workAsyncStorage.getStore()
+    const pendingRevalidatedTags = workStore?.pendingRevalidatedTags
+
+    let checker: ((tag: string) => boolean) | null = null
+    if (
+      revalidatedTags &&
+      revalidatedTags.length > 0 &&
+      pendingRevalidatedTags &&
+      pendingRevalidatedTags.length > 0
+    ) {
+      checker = (tag: string) =>
+        revalidatedTags.includes(tag) || pendingRevalidatedTags.includes(tag)
+    } else if (revalidatedTags && revalidatedTags.length > 0) {
+      checker = (tag: string) => revalidatedTags.includes(tag)
+    } else if (pendingRevalidatedTags && pendingRevalidatedTags.length > 0) {
+      checker = (tag: string) => pendingRevalidatedTags.includes(tag)
+    } else {
+      return false
+    }
+
+    if (softTags?.some(checker) || tags?.some(checker)) {
+      return true
+    }
+
+    return false
   }
 }

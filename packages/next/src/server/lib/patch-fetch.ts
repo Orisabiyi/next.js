@@ -565,7 +565,7 @@ export function createPatchedFetcher(
         const fetchIdx = workStore.nextFetchId ?? 1
         workStore.nextFetchId = fetchIdx + 1
 
-        let handleUnlock = () => Promise.resolve()
+        let handleUnlock: () => void
 
         const doOriginalFetch = async (
           isStale?: boolean,
@@ -663,16 +663,17 @@ export function createPatchedFetcher(
                   // We can skip checking the serverComponentsHmrCache because we aren't in
                   // dev mode.
 
-                  await incrementalCache.set(
-                    cacheKey,
-                    {
-                      kind: CachedRouteKind.FETCH,
-                      data: fetchedData,
-                      revalidate: normalizedRevalidate,
-                    },
-                    { fetchCache: true, fetchUrl, fetchIdx, tags }
-                  )
-                  await handleUnlock()
+                  await incrementalCache
+                    .set(
+                      cacheKey,
+                      {
+                        kind: CachedRouteKind.FETCH,
+                        data: fetchedData,
+                        revalidate: normalizedRevalidate,
+                      },
+                      { fetchCache: true, fetchUrl, fetchIdx, tags }
+                    )
+                    .finally(handleUnlock)
 
                   // We return a new Response to the caller.
                   return new Response(bodyBuffer, {
@@ -749,16 +750,11 @@ export function createPatchedFetcher(
                 }
               }
 
-              // we had response that we determined shouldn't be cached so we return it
-              // and don't cache it. This also needs to unlock the cache lock we acquired.
-              await handleUnlock()
-
+              // We had response that we determined shouldn't be cached so we
+              // return it and don't cache it.
               return res
             })
-            .catch((error) => {
-              handleUnlock()
-              throw error
-            })
+            .finally(handleUnlock)
         }
 
         let cacheReasonOverride
@@ -805,7 +801,7 @@ export function createPatchedFetcher(
             }
 
             if (entry) {
-              await handleUnlock()
+              handleUnlock()
             } else {
               // in dev, incremental cache response will be null in case the browser adds `cache-control: no-cache` in the request headers
               cacheReasonOverride = 'cache-control: no-cache (hard refresh)'
