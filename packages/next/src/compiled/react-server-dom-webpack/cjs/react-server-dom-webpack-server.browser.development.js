@@ -1318,6 +1318,7 @@
       return serializeAsyncIterable(request, task, children, getAsyncIterator);
     }
     function deferTask(request, task) {
+      request.abortableTasks.delete(task);
       task = createTask(
         request,
         task.model,

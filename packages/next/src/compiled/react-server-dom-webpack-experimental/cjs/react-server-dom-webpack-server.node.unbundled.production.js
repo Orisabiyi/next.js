@@ -1104,6 +1104,7 @@ function renderFragment(request, task, children) {
 }
 var serializedSize = 0;
 function deferTask(request, task) {
+  request.abortableTasks.delete(task);
   task = createTask(
     request,
     task.model,
